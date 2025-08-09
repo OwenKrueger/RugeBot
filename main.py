@@ -1,7 +1,6 @@
 import discord
 from discord.ext import commands
 import random
-import pprint
 import datetime
 import calendar
 import os

@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.zip
+*.tar.gz
+.git
+.gitignore
+.env
+Dockerfile
+README.md
+*.md
