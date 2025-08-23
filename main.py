@@ -24,20 +24,6 @@ sticky_channels_dict = {1373779217090875432}
 
 bot = commands.Bot(command_prefix='?', description=description, intents=intents)
 
-#timestamp - TODO: This is using EST - but discord uses utc-0 for all timestamps.
-today = datetime.date.today()
-
-day_of_week = today.weekday()
-days_to_last_tuesday = (day_of_week - calendar.TUESDAY)
-
-#solve edge case - if today is tuesday we are reset, nobody can violate rules
-#if(days_to_last_tuesday == 0):
-#    days_to_last_tuesday = 7
-
-last_tuesday = today - datetime.timedelta(days=days_to_last_tuesday)
-last_tuesday_midnight = datetime.datetime.combine(last_tuesday, datetime.time.min)
-weekly_reset_timestamp = last_tuesday_midnight.timestamp()
-
 # Detects if someone is bumping ealy
 async def post_limit_warden(message):
     if hasattr(message.channel, 'parent') and str(message.channel.parent) == "horde-guilds" and message.author.id != bot_id:
@@ -47,12 +33,24 @@ async def post_limit_warden(message):
             #dont check the message that triggered the event - we want to look at the previous message
             if message.id != historyMessage.id:
                 #if the last message in this channel is younger than the reset time - we have a violation - send a message to the report channel, and link to that message
-                if historyMessage.created_at.timestamp() >= weekly_reset_timestamp:
+                if historyMessage.created_at.timestamp() >= await get_weekly_reset_timestamp():
                     # TODO: create a function to build links for code reuse
                     reporting_channel = bot.get_channel(recruiting_criminals_channel_id)
                     res = "Criminal Scum Detected - Early Bump \n"
                     res += "https://discord.com/channels/"+str(message.guild.id)+"/"+str(message.channel.id)+"/"+str(message.id)
                     await reporting_channel.send(res)
+
+async def get_weekly_reset_timestamp():
+    #timestamp - TODO: This is using EST - but discord uses utc-0 for all timestamps.
+    today = datetime.date.today()
+
+    day_of_week = today.weekday()
+    days_to_last_tuesday = (day_of_week - calendar.TUESDAY)
+
+    last_tuesday = today - datetime.timedelta(days=days_to_last_tuesday)
+    last_tuesday_midnight = datetime.datetime.combine(last_tuesday, datetime.time.min)
+    weekly_reset_timestamp = last_tuesday_midnight.timestamp()
+    return weekly_reset_timestamp
 
 # detects if someone has two threads    
 async def forum_limit_warden(message):
