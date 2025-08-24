@@ -1,0 +1,168 @@
+name: Deploy RugeBot to Windows Server (SSH)
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+    types: [ closed ]
+
+env:
+  SERVICE_NAME: 'RugeBot'
+  DEPLOY_PATH: 'C:\Services\RugeBot'
+  PYTHON_EXE: 'C:\Services\RugeBot\.venv\Scripts\python.exe'
+  NSSM_EXE: 'C:\nssm\nssm.exe'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Upload artifact (source)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rugebot-src
+          path: |
+            main.py
+            requirements.txt
+            readme.md
+            .dockerignore
+            .gitignore
+            dockerfile
+          retention-days: 1
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rugebot-src
+          path: ./publish
+
+      - name: Test SSH connection
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.WINDOWS_SERVER_HOST }}
+          username: ${{ secrets.WINDOWS_SERVER_USERNAME }}
+          password: ${{ secrets.WINDOWS_SERVER_PASSWORD }}
+          port: ${{ secrets.WINDOWS_SERVER_SSH_PORT }}
+          timeout: 30s
+          script: |
+            echo "SSH OK"
+            whoami
+
+      - name: Prepare deploy folder (stop service, clean)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.WINDOWS_SERVER_HOST }}
+          username: ${{ secrets.WINDOWS_SERVER_USERNAME }}
+          password: ${{ secrets.WINDOWS_SERVER_PASSWORD }}
+          port: ${{ secrets.WINDOWS_SERVER_SSH_PORT }}
+          script_stop: true
+          script: |
+            powershell -Command "
+            if (Get-Service -Name '${{ env.SERVICE_NAME }}' -ErrorAction SilentlyContinue) {
+              Write-Host 'Stopping ${{ env.SERVICE_NAME }}...'
+              Stop-Service -Name '${{ env.SERVICE_NAME }}' -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 5
+            }
+            if (!(Test-Path '${{ env.DEPLOY_PATH }}')) {
+              New-Item -ItemType Directory -Path '${{ env.DEPLOY_PATH }}' -Force | Out-Null
+            }
+            # Keep venv if present to speed installs; wipe code files only
+            Get-ChildItem '${{ env.DEPLOY_PATH }}' -Force |
+              Where-Object { $_.Name -ne '.venv' } |
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            "
+
+      - name: Copy files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.WINDOWS_SERVER_HOST }}
+          username: ${{ secrets.WINDOWS_SERVER_USERNAME }}
+          password: ${{ secrets.WINDOWS_SERVER_PASSWORD }}
+          port: ${{ secrets.WINDOWS_SERVER_SSH_PORT }}
+          source: "./publish/*"
+          target: "${{ env.DEPLOY_PATH }}/"
+          strip_components: 0
+
+      - name: Install deps, write env, install/start service
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.WINDOWS_SERVER_HOST }}
+          username: ${{ secrets.WINDOWS_SERVER_USERNAME }}
+          password: ${{ secrets.WINDOWS_SERVER_PASSWORD }}
+          port: ${{ secrets.WINDOWS_SERVER_SSH_PORT }}
+          script_stop: true
+          script: |
+            powershell -Command "
+            $deploy = '${{ env.DEPLOY_PATH }}'
+            $venvPy = '${{ env.PYTHON_EXE }}'
+            $nssm = '${{ env.NSSM_EXE }}'
+
+            # Ensure Python available
+            $pyCmd = (Get-Command py -ErrorAction SilentlyContinue)
+            $pythonCmd = (Get-Command python -ErrorAction SilentlyContinue)
+            if (-not $pyCmd -and -not $pythonCmd) {
+              Write-Error 'Python not found on server. Install Python 3.12 and retry.'
+              exit 1
+            }
+
+            # Create virtualenv if missing
+            if (!(Test-Path $venvPy)) {
+              if ($pyCmd) { py -3.12 -m venv (Join-Path $deploy '.venv') } else { python -m venv (Join-Path $deploy '.venv') }
+            }
+
+            # Upgrade pip and install reqs
+            & $venvPy -m pip install --upgrade pip setuptools wheel
+            & $venvPy -m pip install -r (Join-Path $deploy 'requirements.txt')
+
+            # Write live.env from secrets
+            $envFile = Join-Path $deploy 'live.env'
+            $content = @'
+CLIENT_SECRET=${{ secrets.DISCORD_CLIENT_SECRET }}
+BOT_ID=${{ secrets.DISCORD_BOT_ID }}
+RECRUITING_CRIMINALS_CHANNEL_ID=${{ secrets.DISCORD_RECRUITING_CHANNEL_ID }}
+HORDE_GUILDS_CHANNEL_ID=${{ secrets.DISCORD_HORDE_GUILDS_CHANNEL_ID }}
+'@
+            Set-Content -Path $envFile -Value $content -NoNewline
+
+            # Ensure NSSM exists
+            if (!(Test-Path $nssm)) {
+              Write-Error 'NSSM not found at ' + $nssm + '. Install NSSM (https://nssm.cc) and retry.'
+              exit 1
+            }
+
+            # Install/update service
+            $svc = Get-Service -Name '${{ env.SERVICE_NAME }}' -ErrorAction SilentlyContinue
+            if ($svc) {
+              & $nssm set '${{ env.SERVICE_NAME }}' Application $venvPy
+              & $nssm set '${{ env.SERVICE_NAME }}' AppParameters 'main.py'
+              & $nssm set '${{ env.SERVICE_NAME }}' AppDirectory $deploy
+              & $nssm set '${{ env.SERVICE_NAME }}' Start SERVICE_AUTO_START
+              & $nssm set '${{ env.SERVICE_NAME }}' AppExit Default Restart
+            } else {
+              & $nssm install '${{ env.SERVICE_NAME }}' $venvPy 'main.py'
+              & $nssm set '${{ env.SERVICE_NAME }}' AppDirectory $deploy
+              & $nssm set '${{ env.SERVICE_NAME }}' Start SERVICE_AUTO_START
+              & $nssm set '${{ env.SERVICE_NAME }}' AppExit Default Restart
+              & $nssm set '${{ env.SERVICE_NAME }}' Description 'RugeBot Discord moderation bot'
+            }
+
+            # Start and verify
+            Start-Service -Name '${{ env.SERVICE_NAME }}'
+            Start-Sleep -Seconds 5
+            $svc = Get-Service -Name '${{ env.SERVICE_NAME }}'
+            if ($svc.Status -ne 'Running') {
+              Write-Error ('Service failed to start. Status: ' + $svc.Status)
+              exit 1
+            } else {
+              Write-Host 'Service running.'
+            }
+            "
