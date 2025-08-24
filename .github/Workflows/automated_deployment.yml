@@ -90,7 +90,7 @@ jobs:
           port: ${{ secrets.WINDOWS_SERVER_SSH_PORT }}
           source: "./publish/*"
           target: "${{ env.DEPLOY_PATH }}/"
-          strip_components: 0
+          strip_components: 1
 
       - name: Install deps, write env, install/start service
         uses: appleboy/ssh-action@v1.0.3
